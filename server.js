@@ -65,8 +65,9 @@ async function scrapeProvider(domain, url) {
   };
 
   try {
-    // Intercept requests — captures HLS and subtitles passively before any click
-    await page.route("**/*", (route) => {
+    // Use context.route (not page.route) so we intercept requests from ALL frames,
+    // including cross-origin iframes — which is where vidsrc providers load the player.
+    await context.route("**/*", (route) => {
       const reqUrl = route.request().url();
 
       if (!hlsUrl && reqUrl.includes(".m3u8")) {
@@ -82,18 +83,20 @@ async function scrapeProvider(domain, url) {
       route.continue();
     });
 
-    // Also listen for subtitle requests via page events
-    page.on("request", (request) => {
+    // Listen for requests on the page AND any child frames
+    const onRequest = (request) => {
       const reqUrl = request.url();
       if (isSubtitle(reqUrl) && !subtitles.includes(reqUrl)) {
         subtitles.push(reqUrl);
         console.log(`[${domain}] (onRequest) Found subtitle: ${reqUrl}`);
       }
-    });
+    };
+    page.on("request", onRequest);
 
-    // Log when iframes are attached
+    // When a new frame attaches, also hook its requests
     page.on("frameattached", (frame) => {
       console.log(`[${domain}] Frame attached: ${frame.url()}`);
+      frame.on?.("request", onRequest);
     });
 
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
@@ -150,9 +153,9 @@ async function scrapeProvider(domain, url) {
         `[${domain}] #the_frame not found. Checking passively captured data...`
       );
       if (!hlsUrl) {
-        // Give a short window for any late-firing requests
-        console.warn(`[${domain}] No HLS yet, waiting 3s for late requests...`);
-        await page.waitForTimeout(3000);
+        // Give extra time for iframe chains to fire HLS requests
+        console.warn(`[${domain}] No HLS yet, waiting 8s for late requests...`);
+        await page.waitForTimeout(8000);
       }
     }
 
