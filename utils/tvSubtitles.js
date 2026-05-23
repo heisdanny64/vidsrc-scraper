@@ -8,55 +8,70 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-//random sleep function to delay Promise resolving
-function randomSleep(min = 4000, max = 6000) {
+// Reduced delays for faster responses
+function randomSleep(min = 1000, max = 2500) {
   const delay = Math.floor(Math.random() * (max - min + 1)) + min;
   console.log(`⏳ Sleeping for ${delay}ms`);
   return sleep(delay);
 }
 
-// Function to build Zip url from title
-function buildZipUrlFromTitle(title) {
-  // 1. Remove parentheses
-  console.log("Title: " + title);
-  const clean = title.replace(/[()]/g, "").trim();
-  console.log("Cleaned Title: " + clean);
+// Fetch helper with timeout
+async function fetchWithTimeout(url, options = {}, timeout = 15000) {
+  const controller = new AbortController();
 
-  // 2. Use regex to split the title into showName, episode, and release
+  const id = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+function buildZipUrlFromTitle(title) {
+  console.log("Title:", title);
+
+  const clean = title.replace(/[()]/g, "").trim();
+
+  console.log("Cleaned Title:", clean);
+
   const match = clean.match(/^(.+?)\s+(\d+x\d+)\s+(.+)$/);
+
   if (!match) {
-    console.warn("⚠️ Unexpected title format. Using fallback.");
+    console.warn("Unexpected title format. Using fallback");
+
     const fallback = clean.replace(/\s+/g, "_") + ".en.zip";
+
     return `https://www.tvsubtitles.net/files/${fallback}`;
   }
 
-  const [showTitle, showName, episodeCode, releaseInfo] = match;
-  console.log("Show Title", showTitle);
-  console.log("Show Name", showName);
-  console.log("Episode Code", episodeCode);
-  console.log("Release info", releaseInfo);
+  const [, showName, episodeCode, releaseInfo] = match;
 
   const fileName = `${showName}_${episodeCode}_${releaseInfo}.en.zip`;
 
-  // 3. Return encoded full URL
   return `https://www.tvsubtitles.net/files/${encodeURIComponent(fileName)}`;
 }
 
-// Function to search exact tv show and return id
 async function searchTVShow(title) {
   try {
-    const searchRes = await fetch("https://www.tvsubtitles.net/search.php", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ qs: title }).toString(),
-    });
+    const searchRes = await fetchWithTimeout(
+      "https://www.tvsubtitles.net/search.php",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ qs: title }).toString(),
+      }
+    );
 
     const html = await searchRes.text();
+
     const $ = cheerio.load(html);
 
-    // Find anchor tags with href starting with '/tvshow-' and filter by text content
     const link = $("a[href^='/tvshow-']")
       .filter(function () {
         return $(this).text().toLowerCase().includes(title.toLowerCase());
@@ -64,46 +79,50 @@ async function searchTVShow(title) {
       .first()
       .attr("href");
 
-    if (!link) throw new Error("No TV show found");
+    if (!link) {
+      throw new Error("No TV show found");
+    }
 
     const idMatch = link.match(/tvshow-(\d+)\.html/);
-    if (!idMatch) throw new Error("Show ID not found");
+
+    if (!idMatch) {
+      throw new Error("Show ID not found");
+    }
 
     return idMatch[1];
   } catch (err) {
-    console.error("❌ TVSubtitles Search Error:", err.message);
+    console.error("TVSubtitles Search Error:", err.message);
+    return null;
   }
 }
 
-// Function to return Subtitle Id and Episode Title from episode page
 async function getSubtitleIDAndEpisodeTitle(episodePageId) {
   try {
     const url = `https://www.tvsubtitles.net/episode-${episodePageId}-en.html`;
-    console.log("📄 Fetching episode page:", url);
 
-    const res = await fetch(url, {
+    console.log("Fetching episode page:", url);
+
+    const res = await fetchWithTimeout(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        Connection: "keep-alive",
+        "User-Agent": "Mozilla/5.0",
       },
     });
+
     const html = await res.text();
+
     const $ = cheerio.load(html);
 
-    // Get the first English subtitle link on the episode page
     const anchor = $("a[href^='/subtitle-']").first();
+
     if (!anchor.length) {
-      console.warn("❌ No subtitle link found");
+      console.warn("No subtitle link found");
       return null;
     }
 
-    // Extract subtitleId
-    const subtitleId = anchor.attr("href")?.match(/subtitle-(\d+)\.html/)?.[1];
+    const subtitleId = anchor
+      .attr("href")
+      ?.match(/subtitle-(\d+)\.html/)?.[1];
 
-    // Get the cleaned title
     const h5Text = anchor
       .find("h5")
       .clone()
@@ -115,42 +134,43 @@ async function getSubtitleIDAndEpisodeTitle(episodePageId) {
       .trim();
 
     if (!h5Text || !subtitleId) {
-      console.warn("❌ Could not extract subtitle title or ID");
+      console.warn("Could not extract subtitle title or ID");
       return null;
     }
 
-    console.log("✅ Subtitle ID:", subtitleId);
-    console.log("📝 Subtitle Title:", h5Text);
-    return { subtitleId, subtitleTitle: h5Text };
+    return {
+      subtitleId,
+      subtitleTitle: h5Text,
+    };
   } catch (err) {
-    console.error("❌ Subtitle Page Scrape Error:", err.message);
+    console.error("Subtitle Page Scrape Error:", err.message);
     return null;
   }
 }
 
-// Function to return episode page Id from TV Show page
 async function getEpisodePageId(showId, seasonNumber, episodeNumber) {
   try {
     const url = `https://www.tvsubtitles.net/tvshow-${showId}-${seasonNumber}.html`;
-    const res = await fetch(url, {
+
+    const res = await fetchWithTimeout(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        Connection: "keep-alive",
+        "User-Agent": "Mozilla/5.0",
       },
     });
 
-    if (!res.ok) throw new Error("Failed to fetch season page");
+    if (!res.ok) {
+      throw new Error("Failed to fetch season page");
+    }
 
     const html = await res.text();
+
     const $ = cheerio.load(html);
 
     let episodePageId = null;
 
     $("table.tableauto tr").each((_, row) => {
       const episodeCell = $(row).find("td").first().text().trim();
+
       const episodeMatch = episodeCell.match(/^(\d+)x(\d+)$/);
 
       if (
@@ -158,15 +178,16 @@ async function getEpisodePageId(showId, seasonNumber, episodeNumber) {
         parseInt(episodeMatch[1]) === parseInt(seasonNumber) &&
         parseInt(episodeMatch[2]) === parseInt(episodeNumber)
       ) {
-        console.log(
-          `✅ Match found for episode ${seasonNumber}x${episodeNumber}`
-        );
+        const episodeLink = $(row)
+          .find("td")
+          .eq(1)
+          .find("a")
+          .attr("href");
 
-        const episodeLink = $(row).find("td").eq(1).find("a").attr("href");
-        const episodeMatch = episodeLink?.match(/episode-(\d+)\.html/);
-        if (episodeMatch) {
-          episodePageId = episodeMatch[1];
-          console.log(`🎯 Episode Page ID: ${episodePageId}`);
+        const idMatch = episodeLink?.match(/episode-(\d+)\.html/);
+
+        if (idMatch) {
+          episodePageId = idMatch[1];
         }
       }
     });
@@ -177,169 +198,178 @@ async function getEpisodePageId(showId, seasonNumber, episodeNumber) {
 
     return episodePageId;
   } catch (err) {
-    console.error("❌ TVSubtitles Season Scrape Error:", err.message);
+    console.error("Season Scrape Error:", err.message);
     return null;
   }
 }
 
-// Function to return subtitle download link from Subtitle Page (Optional)
 async function getActualFilenameFromSubtitlePage(subtitleId) {
   try {
     const url = `https://www.tvsubtitles.net/subtitle-${subtitleId}.html`;
-    const res = await fetch(url, {
+
+    const res = await fetchWithTimeout(url, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        Connection: "keep-alive",
+        "User-Agent": "Mozilla/5.0",
       },
     });
 
-    if (!res.ok) throw new Error("Failed to fetch subtitle page");
+    if (!res.ok) {
+      throw new Error("Failed to fetch subtitle page");
+    }
 
     const html = await res.text();
+
     const $ = cheerio.load(html);
 
     let filename = null;
 
     $(".subtitle_grid div").each((i, el) => {
       const label = $(el).text().trim().toLowerCase();
+
       if (label === "filename:") {
-        const value = $(el).next().text().trim();
-        filename = value;
+        filename = $(el).next().text().trim();
       }
     });
 
-    if (!filename) {
-      console.warn("⚠️ Could not find filename on subtitle page");
-      return null;
-    }
-
     return filename;
   } catch (err) {
-    console.error("❌ Subtitle Download Page Scrape Error:", err.message);
+    console.error("Subtitle Page Error:", err.message);
     return null;
   }
 }
 
-// Utility to convert buffer to string
 function streamToString(stream) {
   return new Promise((resolve, reject) => {
     let result = "";
-    stream.on("data", (chunk) => (result += chunk.toString()));
+
+    stream.on("data", (chunk) => {
+      result += chunk.toString();
+    });
+
     stream.on("end", () => resolve(result));
     stream.on("error", reject);
   });
 }
 
-// New helper to extract release part from filename
 function extractReleaseFromFilename(filename) {
   const hyphenParts = filename.split(" - ");
   const lastPart = hyphenParts[2] || "";
 
-  // Remove .en.srt or .srt
   const noExt = lastPart.replace(/\.en\.srt$|\.srt$/, "").trim();
 
   const parts = noExt.split(".");
+
   const hasResolution = parts.some((p) => /\d{3,4}p/.test(p));
 
   if (hasResolution) {
-    // e.g. 720p HDTV.LOL
     const resIndex = parts.findIndex((p) => /\d{3,4}p/.test(p));
+
     const releaseParts = parts.slice(resIndex);
+
     const [res, rip, group] = releaseParts;
 
     if (group) return `${res} ${rip}.${group}`;
     if (rip) return `${res} ${rip}`;
-    return res;
-  } else {
-    // No resolution
-    const last = parts[parts.length - 1];
-    const secondLast = parts[parts.length - 2];
 
-    if (secondLast && secondLast !== last) {
-      return `${secondLast}.${last}`;
-    } else {
-      return last; // e.g. "WEB"
-    }
+    return res;
   }
+
+  const last = parts[parts.length - 1];
+  const secondLast = parts[parts.length - 2];
+
+  if (secondLast && secondLast !== last) {
+    return `${secondLast}.${last}`;
+  }
+
+  return last;
 }
 
-// Function to download and convert .srt file and return .vtt content using the zipUrl
 async function downloadAndConvertToVTT(zipUrl) {
   try {
-    const zipRes = await fetch(zipUrl);
-    if (!zipRes.ok) throw new Error("Failed to download subtitle ZIP");
+    const zipRes = await fetchWithTimeout(zipUrl);
+
+    if (!zipRes.ok) {
+      throw new Error("Failed to download subtitle ZIP");
+    }
 
     const zipBuffer = await zipRes.buffer();
+
     const zip = new AdmZip(zipBuffer);
+
     const srtEntry = zip
       .getEntries()
       .find((entry) => entry.entryName.endsWith(".srt"));
 
-    if (!srtEntry) throw new Error("No .srt file found in ZIP");
+    if (!srtEntry) {
+      throw new Error("No .srt file found in ZIP");
+    }
 
     const srtBuffer = srtEntry.getData();
+
     const srtStream = Readable.from(srtBuffer);
 
     const vttStream = srtStream.pipe(srt2vtt());
-    const vttText = await streamToString(vttStream);
 
-    console.log("✅ Converted VTT:\n");
-    console.log(vttText.slice(0, 500)); // show first 500 characters for preview
-    return vttText;
+    return await streamToString(vttStream);
   } catch (err) {
-    console.error("❌ Conversion error:", err.message);
+    console.error("Conversion error:", err.message);
     return null;
   }
 }
 
 export async function getTVSubtitleVTT(title, season, episode) {
   const showId = await searchTVShow(title);
-  if (!showId) return;
+
+  if (!showId) {
+    return null;
+  }
+
   await randomSleep();
+
   const episodeId = await getEpisodePageId(showId, season, episode);
-  if (!episodeId) return;
+
+  if (!episodeId) {
+    return null;
+  }
+
   await randomSleep();
 
   const subtitleMeta = await getSubtitleIDAndEpisodeTitle(episodeId);
-  if (!subtitleMeta) return;
+
+  if (!subtitleMeta) {
+    return null;
+  }
 
   const { subtitleId, subtitleTitle } = subtitleMeta;
 
   const actualFilename = await getActualFilenameFromSubtitlePage(subtitleId);
+
   let finalTitle = subtitleTitle;
 
   if (actualFilename) {
     const correctRelease = extractReleaseFromFilename(actualFilename);
 
     const match = subtitleTitle.match(/\(([^)]+)\)/);
+
     const currentRelease = match ? match[1] : null;
 
     if (currentRelease) {
       if (currentRelease.includes(".") || currentRelease.includes(" ")) {
         if (currentRelease !== correctRelease) {
-          console.log(
-            `🔁 Replacing incorrect release: (${currentRelease}) ➡ ${correctRelease}`
-          );
           finalTitle = subtitleTitle.replace(
             /\([^)]+\)/,
             `(${correctRelease})`
           );
-        } else {
-          finalTitle = subtitleTitle;
         }
-      } else {
-        // Single word release (like "WEB") — replace regardless
-        finalTitle = subtitleTitle.replace(/\([^)]+\)/, `(${currentRelease})`);
       }
     }
   }
 
   await randomSleep();
+
   const zipUrl = buildZipUrlFromTitle(finalTitle);
-  await randomSleep();
-  console.log("📦 Zip URL:", zipUrl);
+
+  console.log("Zip URL:", zipUrl);
+
   return await downloadAndConvertToVTT(zipUrl);
 }
